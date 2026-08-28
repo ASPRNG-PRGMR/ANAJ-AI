@@ -37,26 +37,7 @@
 //#define CAMERA_MODEL_ESP_EYE // Has PSRAM
 //#define CAMERA_MODEL_AI_THINKER // Has PSRAM
 
-#if defined(CAMERA_MODEL_ESP_EYE)
-#define PWDN_GPIO_NUM    -1
-#define RESET_GPIO_NUM   -1
-#define XCLK_GPIO_NUM    4
-#define SIOD_GPIO_NUM    18
-#define SIOC_GPIO_NUM    23
-
-#define Y9_GPIO_NUM      36
-#define Y8_GPIO_NUM      37
-#define Y7_GPIO_NUM      38
-#define Y6_GPIO_NUM      39
-#define Y5_GPIO_NUM      35
-#define Y4_GPIO_NUM      14
-#define Y3_GPIO_NUM      13
-#define Y2_GPIO_NUM      34
-#define VSYNC_GPIO_NUM   5
-#define HREF_GPIO_NUM    27
-#define PCLK_GPIO_NUM    25
-
-#elif defined(CAMERA_MODEL_ESP32S3_EYE)
+#if defined(CAMERA_MODEL_ESP32S3_EYE)
 #define PWDN_GPIO_NUM  -1
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM  15
@@ -155,50 +136,10 @@ static camera_config_t camera_config = {
  *
  * KEEP GRID_SIZE IN SYNC WITH training/train_tiny_model.py -- if you change
  * one, change the other and retrain.
- *
- * ****** FEATURE SET v2 -- color + texture, not just color ******
- * v1 used [meanR, meanG, meanB, greenRatio] per cell -- four flavors of
- * "what color is this patch," which made the Uno's model a weaker echo of
- * the CNN rather than a meaningfully independent check. v2 replaces that
- * with two color cues and two texture cues per cell:
- *   [meanBrightness, greenRatio, edgeDensity, contrast]
- * - meanBrightness: overall light/dark of the cell (grayscale mean)
- * - greenRatio: kept from v1 -- real disease-relevant color cue
- * - edgeDensity: mean pixel-to-pixel brightness jump, scanning
- *   horizontally across the cell. Smooth healthy tissue -> low. Blotchy/
- *   lesioned tissue -> high. This is texture, not color.
- * - contrast: std-dev of brightness within the cell. Catches "busy"
- *   patches (spotting, lesion boundaries) even when the average color
- *   looks unremarkable.
- * IF YOU CHANGE THIS: mirror it exactly in extract_features() in
- * training/train_tiny_model.py, and retrain -- a stale tiny_model.h
- * trained on v1's feature meaning will produce garbage predictions on
- * v2 feature values even though the array is still 64 uint8_t values
- * and compiles fine. The shape staying the same is exactly what makes
- * this mistake easy to make silently -- there's no compile-time check
- * that catches "trained on the wrong feature semantics."
  */
 #define GRID_SIZE       4
-#define STATS_PER_CELL  4                                          // meanBrightness, greenRatio, edgeDensity, contrast
+#define STATS_PER_CELL  4                                          // meanR, meanG, meanB, greenRatio
 #define FEATURE_COUNT   (GRID_SIZE * GRID_SIZE * STATS_PER_CELL)   // 64
-
-// Fast integer square root (no float, no <math.h> dependency for this).
-// Standard bit-shift method -- exact for uint32_t input.
-uint16_t isqrt(uint32_t n) {
-  uint32_t res = 0;
-  uint32_t bit = 1UL << 30;
-  while (bit > n) bit >>= 2;
-  while (bit != 0) {
-    if (n >= res + bit) {
-      n -= res + bit;
-      res = (res >> 1) + bit;
-    } else {
-      res >>= 1;
-    }
-    bit >>= 2;
-  }
-  return (uint16_t)res;
-}
 
 void extractFeatures(const uint8_t *rgb888, int width, int height, uint8_t *features) {
   int cellW = width / GRID_SIZE;
@@ -208,9 +149,6 @@ void extractFeatures(const uint8_t *rgb888, int width, int height, uint8_t *feat
   for (int gy = 0; gy < GRID_SIZE; gy++) {
     for (int gx = 0; gx < GRID_SIZE; gx++) {
       long sumR = 0, sumG = 0, sumB = 0;
-      long sumGray = 0;
-      long sumGraySq = 0;
-      long sumHEdge = 0;
       long count = 0;
 
       int startX = gx * cellW;
@@ -220,54 +158,26 @@ void extractFeatures(const uint8_t *rgb888, int width, int height, uint8_t *feat
 
       for (int y = startY; y < endY; y++) {
         const uint8_t *rowPtr = &rgb888[(y * width + startX) * 3];
-        int prevGray = -1; // sentinel: no previous pixel yet this row
-
         for (int x = startX; x < endX; x++) {
-          uint8_t r = rowPtr[0], g = rowPtr[1], b = rowPtr[2];
-          sumR += r; sumG += g; sumB += b;
-
-          int gray = (r + g + b) / 3;
-          sumGray += gray;
-          sumGraySq += (long)gray * gray;
-
-          if (prevGray >= 0) {
-            int diff = gray - prevGray;
-            if (diff < 0) diff = -diff;
-            sumHEdge += diff;
-          }
-          prevGray = gray;
-
+          sumR += rowPtr[0];
+          sumG += rowPtr[1];
+          sumB += rowPtr[2];
           rowPtr += 3;
           count++;
         }
       }
 
-      uint8_t meanBrightness = (count > 0) ? (uint8_t)(sumGray / count) : 0;
+      uint8_t meanR = (count > 0) ? (uint8_t)(sumR / count) : 0;
+      uint8_t meanG = (count > 0) ? (uint8_t)(sumG / count) : 0;
+      uint8_t meanB = (count > 0) ? (uint8_t)(sumB / count) : 0;
 
       long total = sumR + sumG + sumB;
       uint8_t greenRatio = (total > 0) ? (uint8_t)((sumG * 255L) / total) : 0;
 
-      // Edge density: mean abs horizontal brightness jump. Denominator
-      // uses `count` (not count-rows) as a cheap approximation -- close
-      // enough for a coarse texture signal, not worth the extra bookkeeping.
-      uint8_t edgeDensity = (count > 0) ? (uint8_t)min(255L, sumHEdge / count) : 0;
-
-      // Contrast: std-dev of brightness within the cell, via integer sqrt
-      // of population variance. Max possible value is well within uint8_t
-      // range (worst case ~127 for a fully bimodal 0/255 split), so no
-      // clamping needed here.
-      uint8_t contrast = 0;
-      if (count > 0) {
-        long meanGrayL = sumGray / count;
-        long variance = (sumGraySq / count) - (meanGrayL * meanGrayL);
-        if (variance < 0) variance = 0; // integer rounding can nudge this slightly negative
-        contrast = (uint8_t)isqrt((uint32_t)variance);
-      }
-
-      features[outIdx++] = meanBrightness;
+      features[outIdx++] = meanR;
+      features[outIdx++] = meanG;
+      features[outIdx++] = meanB;
       features[outIdx++] = greenRatio;
-      features[outIdx++] = edgeDensity;
-      features[outIdx++] = contrast;
     }
   }
 }
@@ -307,8 +217,8 @@ bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf
  * 38/39 are free general-purpose pins outside all of that. Wire the Uno's
  * D2/D3 to these physical pins instead of 44/43.
  */
-#define UART_TO_UNO_RX_PIN  38
-#define UART_TO_UNO_TX_PIN  39
+#define UART_TO_UNO_RX_PIN  41
+#define UART_TO_UNO_TX_PIN  40
 #define UART_TO_UNO_BAUD    9600
 HardwareSerial UnoLink(1);
 
@@ -318,7 +228,7 @@ HardwareSerial UnoLink(1);
 void setup()
 {
     // put your setup code here, to run once:
-    Serial.begin(115200);
+    Serial.begin(9600);
     //comment out the below line to start inference immediately after upload
     while (!Serial);
     Serial.println("Edge Impulse Inferencing Demo");

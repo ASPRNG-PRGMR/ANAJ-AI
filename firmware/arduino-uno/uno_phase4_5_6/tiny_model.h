@@ -30,3 +30,4 @@ static const int16_t MODEL_WEIGHTS[FEATURE_COUNT] PROGMEM = { -48, 6, 38, 5, 43,
 static const int32_t MODEL_BIAS = 8;
 
 #endif // TINY_MODEL_H
+
