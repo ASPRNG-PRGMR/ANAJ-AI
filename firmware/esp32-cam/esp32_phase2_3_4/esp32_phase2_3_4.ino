@@ -232,11 +232,7 @@ void setup()
     //comment out the below line to start inference immediately after upload
     while (!Serial);
     Serial.println("Edge Impulse Inferencing Demo");
-    if (ei_camera_init() == false) {
-        ei_printf("Failed to initialize Camera!\r\n");
-    }
-    else {
-        ei_printf("Camera initialized\r\n");
+    if (ei_camera_init() == false) {intf("Camera initialized\r\n");
     }
 
     // Phase 4: this is the resolution extractFeatures() will actually see
